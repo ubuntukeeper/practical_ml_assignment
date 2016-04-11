@@ -1,0 +1,180 @@
+---
+title: "Predicting correctness of exercise manner"
+date: "April 11, 2016"
+output: html_document
+---
+
+## Background
+
+Using devices such as Jawbone Up, Nike Fuelband and FitBit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+
+In this project, I use data from accelerometers on the belt, forearm, arm, and dumpbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways:
+
+* exactly according to the specification (Class A)
+* throwing elbows to the front (Class B)
+* lifting the dumpbell only halfway (Class C)
+* lowering the dumpbell only halfway (Class D)
+* throwing the hips to the front (Class E)
+
+The main goal of the project is to predict the way each participant does the exercise.
+
+## Load the data
+
+```{r, cache=TRUE}
+training <- read.csv("../data/pml-training.csv")
+testing <- read.csv("../data/pml-testing.csv")
+
+dim(training)
+dim(testing)
+```
+
+## Data cleaning
+
+At first step I convert all data that have numeric values from factor to numeric format. (Since conversion introduces NA's we will suppress the corresponding warning.)
+```{r}
+factor_to_num_cols <- c("kurtosis_roll_belt", "kurtosis_picth_belt", "kurtosis_yaw_belt", "skewness_roll_belt",
+    "skewness_roll_belt.1", "skewness_yaw_belt", "max_yaw_belt", "min_yaw_belt", "amplitude_yaw_belt", 
+    "kurtosis_roll_arm", "kurtosis_picth_arm", "kurtosis_yaw_arm", "skewness_roll_arm", "skewness_pitch_arm", 
+    "skewness_yaw_arm", "kurtosis_roll_dumbbell", "kurtosis_picth_dumbbell", "kurtosis_yaw_dumbbell", 
+    "skewness_roll_dumbbell", "skewness_pitch_dumbbell", "skewness_yaw_dumbbell", "max_yaw_dumbbell", 
+    "min_yaw_dumbbell", "amplitude_yaw_dumbbell", "kurtosis_roll_forearm", "kurtosis_picth_forearm", 
+    "kurtosis_yaw_forearm", "skewness_roll_forearm", "skewness_pitch_forearm", "skewness_yaw_forearm", 
+    "max_yaw_forearm", "min_yaw_forearm", "amplitude_yaw_forearm")
+
+for (col in factor_to_num_cols) {
+    suppressWarnings(training[[col]] <- as.numeric(as.character(training[[col]])))
+    suppressWarnings(testing[[col]] <- as.numeric(as.character(testing[[col]])))
+}
+```
+
+Then I determine which variables have NA's. There are multiple ways of how to treat empty values: imputing means / medians, imputing zeroes. Since the data set is big enough I ignore columns with missing values. (It is reasonable assumption as further analysis shows.)
+
+```{r}
+find_cols_with_nas <- function(data) {
+    temp_col_set <- sapply(sapply(training, function(y) { sum(is.na(y) | length(y) == 1)}), function(y) {y > 0})
+    cols_with_nas <- names(temp_col_set[temp_col_set == TRUE])
+    cols_with_nas
+}
+
+empty_cols <- find_cols_with_nas(training)
+```
+
+There are also columns, that are useless for prediction purposes - timestamps and indices
+```{r}
+useless_cols <- c('X', 'raw_timestamp_part_1', 'raw_timestamp_part_2', 'cvtd_timestamp', 'new_window', 'num_window')
+```
+
+Let's clean the training and testing set by ignoring columns
+```{r}
+training_data <- training[, -which(names(training) %in% empty_cols)]
+training_data <- training_data[, -which(names(training_data) %in% useless_cols)]
+
+testing_data <- testing[, -which(names(testing) %in% empty_cols)]
+testing_data <- testing_data[, -which(names(testing_data) %in% useless_cols)]
+
+dim(training_data)
+dim(testing_data)
+```
+
+## Fitting model
+
+Let's check if there are enough observations for each participant and each class:
+
+```{r}
+library(ggplot2)
+ggplot(training_data, aes(classe)) +
+  geom_bar(fill="wheat") + 
+  facet_grid(.~user_name, margins=FALSE) + 
+  ggtitle("Number of observations per participant / class") +
+  labs(x="Exercise manner class", y="# of observations") + 
+  theme_bw()
+```
+
+Distribution of measurements for each participant and each class is not very skewed, at least for each participant there are at least ~500 observations per class.
+
+Given that we have enough data for each participant, the idea is to train a separate model for each participant. I think this is reasonable approach, because we kind of personalizing prediction algorithm for each participant, which is a good idea because we don't know how the participants differ from each other. Since our testing set observations are marked by participant name, we can use this information later to select appropriate model and make better (supposedly) predictions.
+
+```{r}
+adelmo_data <- training_data[training_data$user_name == 'adelmo', ]
+carlitos_data <- training_data[training_data$user_name == 'carlitos', ]
+charles_data <- training_data[training_data$user_name == 'charles', ]
+eurico_data <- training_data[training_data$user_name == 'eurico', ]
+jeremy_data <- training_data[training_data$user_name == 'jeremy', ]
+pedro_data <- training_data[training_data$user_name == 'pedro', ]
+
+# drop username column
+adelmo_data <- adelmo_data[, -which(names(adelmo_data) %in% c("user_name"))]
+carlitos_data <- carlitos_data[, -which(names(carlitos_data) %in% c("user_name"))]
+charles_data <- charles_data[, -which(names(charles_data) %in% c("user_name"))]
+eurico_data <- eurico_data[, -which(names(eurico_data) %in% c("user_name"))]
+jeremy_data <- jeremy_data[, -which(names(jeremy_data) %in% c("user_name"))]
+pedro_data <- pedro_data[, -which(names(pedro_data) %in% c("user_name"))]
+```
+
+### Model selection
+
+The next big question is what model to fit. Generalized Linear Model (GLM) is a good choice, but it can separate only two classes from each other. Consequently, I will need to train multiple models to separate one class from other classes. So I think, that Random Forest (RF) model is better choice. I will use `caret` library to train model.
+
+```{r}
+library(caret)
+```
+
+Main parameter to optimize in random forest model is number of trees. I optimize this parameter using k-fold cross validation. When using k-fold cross validation (k-1) folds are used to train model and one fold is used as testing data. These "testing" folds can be used to estimate generalization error as following: generalization errors for each iteration (fold) are collected and then averaged to get the generalization error of model. All these steps are done internally by caret's train method, guided by trainControl parameters. After cross validation is done, best model is selected to predict on testing data. I collect accuracy for each cross validated model.
+
+```{r, cache=TRUE, results="hide"}
+set.seed(37483)
+
+get_predictions <- function(data, testing_data, user_name) {
+  model <- train(classe~., method="rf", data=data, prox=TRUE, allowParallel=TRUE, 
+                 trControl=trainControl(method="cv", number=3))
+  
+  model_accuracy_df <- model$results[model$results$mtry == model$bestTune$mtry, ]
+  model_accuracy_df <- cbind(model=user_name, model_accuracy_df)
+  
+  unknown_class_data <- testing_data[which(testing_data$user_name == user_name), ]
+  response_unknown <- predict(model, unknown_class_data)
+  print(as.character(response_unknown))
+  
+  predictions_df <- cbind("problem_id"=unknown_class_data$problem_id, 
+                          "response"=as.character(response_unknown))
+  list("accuracy"=model_accuracy_df, "predictions"=predictions_df)
+}
+
+model_accuracies <- data.frame()
+model_predictions <- data.frame()
+
+results <- get_predictions(adelmo_data, testing_data, "adelmo")
+model_accuracies <- rbind(model_accuracies, results$accuracy)
+model_predictions <- rbind(model_predictions, results$predictions)
+
+results <- get_predictions(carlitos_data, testing_data, "carlitos")
+model_accuracies <- rbind(model_accuracies, results$accuracy)
+model_predictions <- rbind(model_predictions, results$predictions)
+
+results <- get_predictions(charles_data, testing_data, "charles")
+model_accuracies <- rbind(model_accuracies, results$accuracy)
+model_predictions <- rbind(model_predictions, results$predictions)
+
+results <- get_predictions(eurico_data, testing_data, "eurico")
+model_accuracies <- rbind(model_accuracies, results$accuracy)
+model_predictions <- rbind(model_predictions, results$predictions)
+
+results <- get_predictions(jeremy_data, testing_data, "jeremy")
+model_accuracies <- rbind(model_accuracies, results$accuracy)
+model_predictions <- rbind(model_predictions, results$predictions)
+
+results <- get_predictions(pedro_data, testing_data, "pedro")
+model_accuracies <- rbind(model_accuracies, results$accuracy)
+model_predictions <- rbind(model_predictions, results$predictions)
+```
+
+
+Analysis shows that each of the trained models gives ~99% accuracy on cross validation. 
+```{r}
+model_accuracies
+```
+
+Data from `model_predictions` data frame can be used for submission.
+```{r}
+model_predictions
+```
